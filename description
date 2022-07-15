@@ -1,0 +1,17 @@
+Example train-run
+
+# Set-up directories as follows before training
+# Dataset path: ./experiments/mdl/anime-face/dataset (lmdb format)
+# Checkpoint path: ./experiments/mdl/anime-face/checkpoint
+# Generated samples path: ./experiments/mdl/anime-face/sample
+# Interpolation samples path: ./experiments/mdl/anime-face/sample/interpolationW
+
+python3 train_mdl.py --root experiments/mdl/anime-face --batch 4 --dir_div 1 --highp 4 --interp_freq 2 --kl_wt 1000 --n_mlp 8 --iter 120000 dataset
+
+
+
+Example inference-run
+
+# Provide root-dir for the experiment as well as the specific checkpoint with which to generate samples (default #samples=5000)
+
+python3 generate_individual.py --root ./experiments/mdl/anime-face --ckpt checkpoint/050000.pt
