@@ -7,7 +7,9 @@
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
 <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch->=1.9.0-Red?logo=pytorch"></a>
 
-<img src="docs/main.jpg" width="800px">
+<img src="docs/fig1.jpg" width="800px">
+
+<img src="docs/pipeline.jpg" width="800px">
 
 # Getting Started
 ## Requirements
@@ -55,6 +57,10 @@ $ python3 train_mixdl.py
 ```bash
 $ python3 generate.py
 ```
+
+<img src="docs/low-shot.jpg" width="800px">
+
+<img src="docs/interp_rename.jpg" width="800px">
 
 # Evaluation
 
