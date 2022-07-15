@@ -7,9 +7,9 @@
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg"></a>
 <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch->=1.9.0-Red?logo=pytorch"></a>
 
-<img src="docs/fig1.jpg" width="800px">
+<img src="docs/fig1.jpg" width="1000px">
 
-<img src="docs/pipeline.jpg" width="800px">
+<img src="docs/pipeline.jpg" width="1000px">
 
 # Getting Started
 ## Requirements
