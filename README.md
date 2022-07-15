@@ -64,7 +64,7 @@ $ python3 generate.py
 
 # Evaluation
 
-We use [pytorch implementation](https://github.com/mseitzer/pytorch-fid) of [Frechet Inception Score](https://arxiv.org/abs/1706.08500?context=cs)
+We use [pytorch implementation](https://github.com/mseitzer/pytorch-fid) of [Frechet Inception Score](https://arxiv.org/abs/1706.08500?context=cs).
 
 ```bash
 $ python3 -m pytorch_fid PATH/TO/REAL_IMAGES PATH/TO/FAKE_IMAGES
