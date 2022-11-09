@@ -48,11 +48,11 @@ class Inception3Feature(Inception3):
         return x.view(x.shape[0], x.shape[1])  # 1 x 1 x 2048
 
 
-def load_patched_inception_v3():
+def load_patched_inception_v3(level):
     # inception = inception_v3(pretrained=True)
     # inception_feat = Inception3Feature()
     # inception_feat.load_state_dict(inception.state_dict())
-    inception_feat = InceptionV3([3], normalize_input=False)
+    inception_feat = InceptionV3([level], normalize_input=False)
 
     return inception_feat
 
@@ -91,18 +91,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_sample",
         type=int,
-        default=50000,
+        default=5000,
         help="number of samples used for embedding calculation",
     )
     parser.add_argument(
         "--flip", action="store_true", help="apply random flipping to real images"
     )
-    parser.add_argument("path", metavar="PATH", help="path to datset lmdb file")
+    parser.add_argument(
+        "--sfid", action='store_true', help='whether to compute sfid'
+    )
+    # parser.add_argument(
+    #     "--out", type=str, default="./", help='path at which to save pkls'
+    # )
+    parser.add_argument("path", metavar="PATH", help="path to dataset lmdb file")
 
     args = parser.parse_args()
 
-    inception = load_patched_inception_v3()
-    inception = nn.DataParallel(inception).eval().to(device)
+    if args.sfid:
+        inception = load_patched_inception_v3(2)
+    else:
+        inception = load_patched_inception_v3(3)
+    # inception = nn.DataParallel(inception).eval().to(device)
+    inception = inception.eval().to(device)
 
     transform = transforms.Compose(
         [
@@ -117,7 +127,8 @@ if __name__ == "__main__":
 
     features = extract_features(loader, inception, device).numpy()
 
-    features = features[: args.n_sample]
+    if args.n_sample > len(features):
+        features = features[: args.n_sample]
 
     print(f"extracted {features.shape[0]} features")
 
@@ -126,5 +137,11 @@ if __name__ == "__main__":
 
     name = os.path.splitext(os.path.basename(args.path))[0]
 
-    with open(f"inception_{name}.pkl", "wb") as f:
-        pickle.dump({"mean": mean, "cov": cov, "size": args.size, "path": args.path}, f)
+    if args.sfid:
+        os.makedirs("inception_features/s_inception/", exist_ok=True)
+        with open(f"inception_features/s_inception/inception_{name}.pkl", "wb") as f:
+            pickle.dump({"mean": mean, "cov": cov, "size": args.size, "path": args.path}, f)
+    else:
+        os.makedirs("inception_features/inception/", exist_ok=True)
+        with open(f"inception_features/inception/inception_{name}.pkl", "wb") as f:
+            pickle.dump({"mean": mean, "cov": cov, "size": args.size, "path": args.path}, f)

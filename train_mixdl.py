@@ -2,7 +2,6 @@ import argparse
 import math
 import random
 import os
-
 import torch
 from torch import nn, autograd, optim
 from torch.nn import functional as F
@@ -11,13 +10,14 @@ import torch.distributed as dist
 from torchvision import transforms, utils
 from tqdm import tqdm
 import numpy
+from calc_inception import load_patched_inception_v3
+from fid import *
 
 try:
     import wandb
 
 except ImportError:
     wandb = None
-
 
 from dataset import MultiResolutionDataset
 from distributed import (
@@ -53,19 +53,16 @@ def accumulate(model1, model2, decay=0.999):
     for k in par1.keys():
         par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
 
-
 def sample_data(loader):
     while True:
         for batch in loader:
             yield batch
-
 
 def d_logistic_loss(real_pred, fake_pred):
     real_loss = F.softplus(-real_pred)
     fake_loss = F.softplus(fake_pred)
 
     return real_loss.mean() + fake_loss.mean()
-
 
 def d_r1_loss(real_pred, real_img):
     with conv2d_gradfix.no_weight_gradients():
@@ -75,7 +72,6 @@ def d_r1_loss(real_pred, real_img):
     grad_penalty = grad_real.pow(2).reshape(grad_real.shape[0], -1).sum(1).mean()
 
     return grad_penalty
-
 
 def g_nonsaturating_loss(fake_pred):
     loss = F.softplus(-fake_pred).mean()
@@ -97,10 +93,6 @@ def g_path_regularize(fake_img, latents, mean_path_length, decay=0.01):
     path_penalty = (path_lengths - path_mean).pow(2).mean()
 
     return path_penalty, path_mean.detach(), path_lengths
-
-def equidis_reg():
-    # TODO!
-    pass
 
 def unif_norm(tens):
     assert len(tens.size()) == 2
@@ -128,25 +120,36 @@ def set_grad_none(model, targets):
         if n in targets:
             p.grad = None
 
-def generate(args, g_ema, device, mean_latent, idx):
+def generate(args, g_ema, device, mean_latent, n_ckpt, batch_size=8, n_samples=5000):
     with torch.no_grad():
         g_ema.eval()
+        save_path = os.path.join(args.root, f"sample/individual/{n_ckpt}")
+        os.makedirs(save_path, exist_ok=True)
         j = 0
-        n_ckpt = idx
-        if os.path.exists(args.root+f"/sample/individual/{n_ckpt}/000001.png"):
-            return
-        if not os.path.exists(args.root+f"/sample/individual/{n_ckpt}"):
-            os.makedirs(args.root+f"/sample/individual/{n_ckpt}")
-        for i in tqdm(range(5000//8)):
-            sample_z = torch.randn(8, 512, device=device)
-
+        remains = n_samples % batch_size
+        for i in tqdm(range(n_samples//batch_size)):
+            sample_z = torch.randn(batch_size, 512, device=device)
             samples, _ = g_ema(
                 [sample_z], truncation=1, truncation_latent=mean_latent, input_is_latent=False
             )
             for sample in samples:
                 utils.save_image(
                     sample,
-                    args.root+f"/sample/individual/{n_ckpt}/{str(j+1).zfill(6)}.png", # TODO: Alter file path
+                    save_path + f"/{str(j+1).zfill(6)}.png",
+                    nrow=1,
+                    normalize=True,
+                    range=(-1, 1),
+                )
+                j += 1
+        if remains > 0:
+            sample_z = torch.randn(remains, 512, device=device)
+            samples, _ = g_ema(
+                [sample_z], truncation=1, truncation_latent=mean_latent, input_is_latent=False
+            )
+            for sample in samples:
+                utils.save_image(
+                    sample,
+                    save_path + f"/{str(j + 1).zfill(6)}.png",
                     nrow=1,
                     normalize=True,
                     range=(-1, 1),
@@ -154,25 +157,24 @@ def generate(args, g_ema, device, mean_latent, idx):
                 j += 1
 
 def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_optim, g_ema, device):
-    loader = sample_data(loader)
 
+    loader = sample_data(loader)
     pbar = range(args.iter)
 
     if get_rank() == 0:
         pbar = tqdm(pbar, initial=args.start_iter, dynamic_ncols=True, smoothing=0.01)
 
     mean_path_length = 0
-
+    mean_path_length_avg = 0
     d_loss_val = 0
-    r1_loss = torch.tensor(0.0, device=device)
     g_loss_val = 0
+    r1_loss = torch.tensor(0.0, device=device)
     path_loss = torch.tensor(0.0, device=device)
     path_lengths = torch.tensor(0.0, device=device)
     sfm = nn.Softmax(dim=1)
     kl_loss = nn.KLDivLoss()
     sim = nn.CosineSimilarity()
     l2 = nn.MSELoss()
-    mean_path_length_avg = 0
     loss_dict = {}
 
     if args.distributed:
@@ -189,31 +191,25 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
     ada_aug_step = args.ada_target / args.ada_length
     r_t_stat = 0
 
-    # if args.augment and args.augment_p == 0:
-    #     ada_augment = AdaptiveAugment(args.ada_target, args.ada_length, 8, device)
-
     sample_z = torch.randn(args.n_sample, args.latent, device=device)
 
-    # k = 1
-    # d_ratio_mean = 0
-    lowp, highp = 0, args.highp
+    # Range of generator layers to extract features from
+    lb, ub = 0, args.ub
 
-    # equidistance_reg = True
-    # adaptive = False
-    # evaluate_interp = True
-
-    distr = torch.distributions.dirichlet.Dirichlet(torch.ones(args.batch)/args.dir_div, validate_args=None)
+    # Distribution to sample mixup coefficients from
     if args.gaussian:
         distr = torch.distributions.multivariate_normal.MultivariateNormal(torch.zeros(args.batch), torch.eye(args.batch))
-    if args.uniform:
+    elif args.uniform:
         distr = torch.distributions.uniform.Uniform(0, 1)
+    else:
+        distr = torch.distributions.dirichlet.Dirichlet(torch.ones(args.batch) / args.dir_div, validate_args=None)
 
+    # Start training
     for idx in pbar:
         i = idx + args.start_iter
 
         if i > args.iter:
             print("Done!")
-
             break
 
         real_img = next(loader)
@@ -223,29 +219,25 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
         requires_grad(discriminator, True)
         requires_grad(extra, True)
 
-        # Flags for interpolation and dynamic adv training
-        which = i % args.interp_freq
-        is_dynamic = (args.dynamic and i % args.dynamic_every==0)
+        # Flags for lazy mixup regularization
+        which = i % args.mixup_every
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
-        if which == 0:
+        if which > 0:
             fake_img, _ = generator(noise)
             if args.augment:
                 fake_img, _ = augment(fake_img, ada_aug_p)
-            fake_pred, _ = discriminator(fake_img, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp))  # TODO: __main__ should input extra and e_optim
+            fake_pred, _ = discriminator(fake_img, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub))
 
         if args.augment:
             real_img_aug, _ = augment(real_img, ada_aug_p)
         else:
             real_img_aug = real_img
 
-        real_pred, _ = discriminator(real_img_aug, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp), real=True)
+        real_pred, _ = discriminator(real_img_aug, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub), real=True)
 
-        # w = generator.get_latent(z)  # (Batch, 512)
-        # fake_img, _ = generator([w], return_feats=False, input_is_latent=True)
-
-        if which > 0:
+        if which == 0:
             if args.uniform:
                 alpha = distr.sample((args.batch,args.batch)).to(device)
                 alpha = unif_norm(alpha)
@@ -254,27 +246,27 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
                 if args.gaussian:
                     alpha = sfm(alpha)
             z = torch.randn(args.batch, args.latent, device=device)
-            if args.workstation:
+            try:
+                fake_img, w = generator([z], return_latents=True)  # (Batch, 512)
+            except:
                 w = generator.get_latent(z)  # (Batch, 512)
                 fake_img, _ = generator([w], return_feats=False, input_is_latent=True)
-            else:
-                fake_img, w = generator([z], return_latents=True)  # (Batch, 512)
-            w = torch.matmul(alpha, w)
-            if args.workstation:
-                interp_img, _ = generator([w], return_feats=False, input_is_latent=True)
-            else:
+            w = torch.matmul(alpha, w) # Form mixup latent codes
+            try:
                 interp_img, _ = generator(w, return_feats=False, input_is_latent=True)
+            except:
+                interp_img, _ = generator([w], return_feats=False, input_is_latent=True)
             if args.augment:
                 interp_img, _ = augment(interp_img, ada_aug_p)
                 fake_img, _ = augment(fake_img, ada_aug_p)
             inp_imgs = torch.cat([fake_img, interp_img], dim=0)
-            fake_pred, _ = discriminator(interp_img, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp), sim=False)
-            _, sim_pred = discriminator(inp_imgs, extra=extra, flag=1-which, p_ind=numpy.random.randint(lowp, highp), sim=True)
+            fake_pred, _ = discriminator(interp_img, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub), sim=False)
+            _, sim_pred = discriminator(inp_imgs, extra=extra, flag=1-which, p_ind=numpy.random.randint(lb, ub), sim=True)
             rel_loss = args.d_kl_wt * kl_loss(torch.log(sim_pred), sfm(alpha))
 
         d_loss = d_logistic_loss(real_pred, fake_pred)
 
-        if which > 0:
+        if which == 0:
             d_loss += rel_loss
 
         loss_dict["d"] = d_loss
@@ -313,7 +305,7 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
         if d_regularize:
             real_img.requires_grad = True
             real_pred, _ = discriminator(
-                real_img, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp))
+                real_img, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub))
             real_pred = real_pred.view(real_img.size(0), -1)
             real_pred = real_pred.mean(dim=1).unsqueeze(1)
 
@@ -334,14 +326,13 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
 
         noise = mixing_noise(args.batch, args.latent, args.mixing, device)
 
-        if which == 0:
+        if which > 0:
             fake_img, _ = generator(noise)
             if args.augment:
                 fake_img, _ = augment(fake_img, ada_aug_p)
-            fake_pred, _ = discriminator(fake_img, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp))
+            fake_pred, _ = discriminator(fake_img, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub))
 
-        elif which > 0:
-            # alpha = distr.sample((args.batch,)).to(device)  # (Batch, Batch)
+        elif which == 0:
             if args.uniform:
                 alpha = distr.sample((args.batch,args.batch)).to(device)
                 alpha = unif_norm(alpha)
@@ -355,15 +346,11 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
             interp_img, _ = generator([w], return_feats=False, input_is_latent=True)
             if args.augment:
                 interp_img, _ = augment(interp_img, ada_aug_p)
-            fake_pred, _ = discriminator(interp_img, extra=extra, flag=which, p_ind=numpy.random.randint(lowp, highp))
+            fake_pred, _ = discriminator(interp_img, extra=extra, flag=which, p_ind=numpy.random.randint(lb, ub))
 
         g_loss = g_nonsaturating_loss(fake_pred)
 
-
-        #############################
-        # TODO: Reset Var Name
-
-        if which > 0:
+        if which == 0:
 
             z = torch.randn(args.batch, args.latent, device=device)
 
@@ -377,10 +364,7 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
 
             img_source, feat_source = generator([w], return_feats=True, input_is_latent=True)        # Edge
             img_target, feat_target = generator([sample_w], return_feats=True, input_is_latent=True) # Interpolated
-            # with torch.no_grad():
-            #     d1, d2 = discriminator(img_target[0].unsqueeze(0)), discriminator(img_target[1].unsqueeze(0))
-            #     d_ratio = d1.mean() / (d2.mean()+1e-8)
-            #     d_ratio_mean = ((d_ratio+4*d_ratio_mean)/5).item()
+
             dist_target = torch.zeros([args.batch, args.batch]).cuda()
 
             # iterating over different elements in the batch
@@ -396,20 +380,11 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
                 kl_loss(torch.log(dist_target), dist_source) # distance consistency loss
             g_loss = g_loss + rel_loss
 
-        ###############################
-
-
         loss_dict["g"] = g_loss
 
         generator.zero_grad()
         g_loss.backward()
         g_optim.step()
-
-        # if adaptive:
-        #     if d_ratio_mean > 2 and k<5:
-        #         print(f"Increase k to {k+1} at iter {i}, d_ratio_mean {d_ratio_mean:.2f}")
-        #         k += 1
-        #         d_ratio_mean = 0
 
         g_regularize = i % args.g_reg_every == 0
 
@@ -476,7 +451,7 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
                     }
                 )
 
-            if i % 500 == 0:
+            if i % args.sample_every == 0:
                 with torch.no_grad():
                     g_ema.eval()
                     sample, _ = g_ema([sample_z], return_latents=False)
@@ -497,7 +472,7 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
                     )
                     utils.save_image(
                         interp,
-                        args.root + f"/sample/interpolationW/{str(i).zfill(6)}.png",
+                        args.root + f"/sample/interp_{str(i).zfill(6)}.png",
                         nrow=int(8),
                         normalize=True,
                         range=(-1, 1),
@@ -522,152 +497,49 @@ def train(args, loader, generator, discriminator, extra, g_optim, d_optim, e_opt
 if __name__ == "__main__":
     device = "cuda"
 
-    parser = argparse.ArgumentParser(description="StyleGAN2 trainer")
+    parser = argparse.ArgumentParser(description="MixDL trainer")
 
     parser.add_argument("path", type=str, help="path to the lmdb dataset")
     parser.add_argument("--root", type=str, help="root directory of the experiment")
     parser.add_argument('--arch', type=str, default='stylegan2', help='model architectures (stylegan2 | swagan)')
-    parser.add_argument(
-        "--iter", type=int, default=150001, help="total training iterations"
-    )
-    parser.add_argument("--save_every", default=10000, type=int, help="when to save model checkpoints")
-    parser.add_argument(
-        "--batch", type=int, default=4, help="batch sizes for each gpus"
-    )
-    parser.add_argument(
-        "--interp_freq", type=int, default=2, help='Interval of interpolation during training'
-    )
-    parser.add_argument(
-        "--n_sample",
-        type=int,
-        default=25,
-        help="number of the samples generated during training",
-    )
-    parser.add_argument(
-        "--size", type=int, default=256, help="image sizes for the model"
-    )
-    parser.add_argument("--highp", type=int, default=4)
-    parser.add_argument("--dir_div", type=float, default=1.0)
-    parser.add_argument(
-        "--r1", type=float, default=10, help="weight of the r1 regularization"
-    )
-    parser.add_argument(
-        "--path_regularize",
-        type=float,
-        default=2,
-        help="weight of the path length regularization",
-    )
-    parser.add_argument(
-        "--path_batch_shrink",
-        type=int,
-        default=2,
-        help="batch size reducing factor for the path length regularization (reduce memory consumption)",
-    )
-    parser.add_argument(
-        "--d_reg_every",
-        type=int,
-        default=16,
-        help="interval of the applying r1 regularization",
-    )
-    parser.add_argument(
-        "--g_reg_every",
-        type=int,
-        default=4,
-        help="interval of the applying path length regularization",
-    )
-    parser.add_argument(
-        "--mixing", type=float, default=0.9, help="probability of latent code mixing"
-    )
-    parser.add_argument(
-        "--ckpt",
-        type=str,
-        default=None,
-        help="path to the checkpoints to resume training",
-    )
+    parser.add_argument("--iter", type=int, default=150001, help="total training iterations")
+    parser.add_argument("--batch", type=int, default=4, help="batch sizes for each gpus")
     parser.add_argument("--lr", type=float, default=0.002, help="learning rate")
-    parser.add_argument(
-        "--channel_multiplier",
-        type=int,
-        default=2,
-        help="channel multiplier factor for the model. config-f = 2, else = 1",
-    )
-    parser.add_argument(
-        "--wandb", action="store_true", help="use weights and biases logging"
-    )
-    parser.add_argument(
-        "--local_rank", type=int, default=0, help="local rank for distributed training"
-    )
-    parser.add_argument(
-        "--augment", action="store_true", help="apply non leaking augmentation"
-    )
-    parser.add_argument(
-        "--augment_p",
-        type=float,
-        default=0,
-        help="probability of applying augmentation. 0 = use adaptive augmentation",
-    )
-    parser.add_argument(
-        "--ada_target",
-        type=float,
-        default=0.6,
-        help="target augmentation probability for adaptive augmentation",
-    )
-    parser.add_argument(
-        "--ada_length",
-        type=int,
-        default=500 * 1000,
-        help="target duraing to reach augmentation probability for adaptive augmentation"
-    )
-    parser.add_argument(
-        "--ada_every",
-        type=int,
-        default=256,
-        help="probability update interval of the adaptive augmentation",
-    )
-    parser.add_argument(
-        "--kl_wt",
-        type=float,
-        default=1000.0,
-        help="Weight of KL loss term"
-    )
-    parser.add_argument(
-        "--dynamic",
-        type=str,
-        default="False",
-        help="Whether to use dynamic adversarial training scheme"
-    )
-    parser.add_argument(
-        "--dynamic_every",
-        type=int,
-        default=2,
-        help="interval of applying dynamic adv training"
-    )
-    parser.add_argument(
-        "--n_mlp",
-        type=int,
-        default=8,
-        help="number of fc layers in mapping network"
-    )
-    parser.add_argument(
-        "--d_kl_wt",
-        type=float,
-        default=1.0
-    )
-    parser.add_argument(
-        '--gaussian',
-        action='store_true',
-        help='whether to sample interpolation coefficient from standard gaussian distribution'
-    )
-    parser.add_argument(
-        '--uniform',
-        action='store_true',
-        help='whether to sample interpolation coefficient from uniform distribution'
-    )
-    parser.add_argument(
-        '--workstation',
-        action='store_true',
-        help='whether we are working on the workstation'
-    )
+    parser.add_argument("--size", type=int, default=256, help="image sizes for the model")
+    parser.add_argument("--n_sample", type=int, default=25, help="number of the samples in each snapshot")
+    parser.add_argument("--ckpt", type=str, default=None, help="path to the checkpoints to resume training")
+
+    parser.add_argument("--sample_every", type=int, default=1000, help='Interval of sample snapshots')
+    parser.add_argument("--save_every", default=10000, type=int, help="when to save model checkpoints")
+    parser.add_argument("--mixup_every", type=int, default=2, help='Interval of mixup regularization during training')
+    parser.add_argument("--d_reg_every", type=int, default=16, help="interval of the applying r1 regularization")
+    parser.add_argument("--g_reg_every", type=int, default=4, help="interval of the applying path length regularization")
+    parser.add_argument("--ada_every", type=int, default=256, help="probability update interval of the adaptive augmentation")
+
+    parser.add_argument("--n_mlp", type=int, default=8, help="number of fc layers in mapping network")
+    parser.add_argument("--channel_multiplier", type=int, default=2, help="channel multiplier factor for the model. config-f = 2, else = 1")
+
+    parser.add_argument("--ub", type=int, default=4)
+    parser.add_argument("--dir_div", type=float, default=1.0)
+
+    parser.add_argument("--r1", type=float, default=10, help="weight of the r1 regularization")
+    parser.add_argument("--path_regularize", type=float, default=2, help="weight of the path length regularization")
+    parser.add_argument("--path_batch_shrink", type=int, default=2, help="batch size reducing factor for the path length regularization (reduce memory consumption)")
+    parser.add_argument("--kl_wt", type=float, default=1000.0, help="Weight of Generator KL loss term")
+    parser.add_argument("--d_kl_wt", type=float, default=1.0, help="Weight of Discriminator KL loss term")
+
+    parser.add_argument("--mixing", type=float, default=0.9, help="probability of latent code mixing")
+    parser.add_argument("--augment", action="store_true", help="apply non leaking augmentation")
+    parser.add_argument("--augment_p", type=float, default=0, help="probability of applying augmentation. 0 = use adaptive augmentation")
+    parser.add_argument("--ada_target", type=float, default=0.6, help="target augmentation probability for adaptive augmentation")
+    parser.add_argument("--ada_length", type=int, default=500 * 1000, help="target duraing to reach augmentation probability for adaptive augmentation")
+
+    parser.add_argument('--gaussian', action='store_true', help='whether to sample mixup coefficient from gaussian distribution')
+    parser.add_argument('--uniform', action='store_true', help='whether to sample mixup coefficient from uniform distribution')
+
+    parser.add_argument("--wandb", action="store_true", help="use weights and biases logging")
+    parser.add_argument("--local_rank", type=int, default=0, help="local rank for distributed training")
+
 
     args = parser.parse_args()
 
@@ -680,13 +552,11 @@ if __name__ == "__main__":
         synchronize()
 
     args.latent = 512
-
     args.start_iter = 0
 
     if args.arch == 'stylegan2':
         from model_cdc import Generator, Extra
         from model_cdc import Patch_Discriminator as Discriminator
-        # from model import Discriminator
 
     elif args.arch == 'swagan':
         from swagan import Generator, Discriminator

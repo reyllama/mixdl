@@ -58,7 +58,7 @@ if __name__ == '__main__':
     parser.add_argument("--source_path", type=str, required=True)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--n_sample", type=int, default=500)
+    parser.add_argument("--n_sample", type=int, default=1000)
 
     args = parser.parse_args()
 

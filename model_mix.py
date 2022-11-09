@@ -13,6 +13,7 @@ from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
 from torch.nn import init
 from packaging import version
 
+
 class PixelNorm(nn.Module):
     def __init__(self):
         super().__init__()
@@ -95,7 +96,7 @@ class Blur(nn.Module):
 
 class EqualConv2d(nn.Module):
     def __init__(
-        self, in_channel, out_channel, kernel_size, stride=1, padding=0, bias=True
+            self, in_channel, out_channel, kernel_size, stride=1, padding=0, bias=True
     ):
         super().__init__()
 
@@ -133,7 +134,7 @@ class EqualConv2d(nn.Module):
 
 class EqualLinear(nn.Module):
     def __init__(
-        self, in_dim, out_dim, bias=True, bias_init=0, lr_mul=1, activation=None
+            self, in_dim, out_dim, bias=True, bias_init=0, lr_mul=1, activation=None
     ):
         super().__init__()
 
@@ -182,15 +183,15 @@ class ScaledLeakyReLU(nn.Module):
 
 class ModulatedConv2d(nn.Module):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        style_dim,
-        demodulate=True,
-        upsample=False,
-        downsample=False,
-        blur_kernel=[1, 3, 3, 1],
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            style_dim,
+            demodulate=True,
+            upsample=False,
+            downsample=False,
+            blur_kernel=[1, 3, 3, 1],
     ):
         super().__init__()
 
@@ -308,14 +309,14 @@ class ConstantInput(nn.Module):
 
 class StyledConv(nn.Module):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        style_dim,
-        upsample=False,
-        blur_kernel=[1, 3, 3, 1],
-        demodulate=True,
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            style_dim,
+            upsample=False,
+            blur_kernel=[1, 3, 3, 1],
+            demodulate=True,
     ):
         super().__init__()
 
@@ -367,13 +368,13 @@ class ToRGB(nn.Module):
 
 class Generator(nn.Module):
     def __init__(
-        self,
-        size,
-        style_dim,
-        n_mlp,
-        channel_multiplier=2,
-        blur_kernel=[1, 3, 3, 1],
-        lr_mlp=0.01,
+            self,
+            size,
+            style_dim,
+            n_mlp,
+            channel_multiplier=2,
+            blur_kernel=[1, 3, 3, 1],
+            lr_mlp=0.01,
     ):
         super().__init__()
 
@@ -474,16 +475,16 @@ class Generator(nn.Module):
         return self.style(input)
 
     def forward(
-        self,
-        styles,
-        return_latents=False,
-        inject_index=None,
-        truncation=1,
-        truncation_latent=None,
-        input_is_latent=False,
-        noise=None,
-        randomize_noise=True,
-        return_feats=False,
+            self,
+            styles,
+            return_latents=False,
+            inject_index=None,
+            truncation=1,
+            truncation_latent=None,
+            input_is_latent=False,
+            noise=None,
+            randomize_noise=True,
+            return_feats=False,
     ):
         if not input_is_latent:
             styles = [self.style(s) for s in styles]
@@ -505,8 +506,6 @@ class Generator(nn.Module):
                 )
 
             styles = style_t
-        
-    
 
         if len(styles) < 2:
             inject_index = self.n_latent
@@ -526,8 +525,8 @@ class Generator(nn.Module):
             latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
             latent = torch.cat([latent, latent2], 1)
 
-            #latent = styles[0].unsqueeze(1).repeat(1, self.n_latent, 1)
-            #latent[:, inject_index-1, :] = styles[1]
+            # latent = styles[0].unsqueeze(1).repeat(1, self.n_latent, 1)
+            # latent[:, inject_index-1, :] = styles[1]
 
         feat_list = []
         out = self.input(latent)
@@ -537,7 +536,7 @@ class Generator(nn.Module):
 
         i = 1
         for conv1, conv2, noise1, noise2, to_rgb in zip(
-            self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
             out = conv1(out, latent[:, i], noise=noise1)
             feat_list.append(out)
@@ -545,30 +544,29 @@ class Generator(nn.Module):
             feat_list.append(out)
             skip = to_rgb(out, latent[:, i + 2], skip)
 
-
             i += 2
 
         image = skip
         if return_latents:
             return image, latent
-        
+
         elif return_feats:
             return image, feat_list
-        
+
         else:
             return image, None
 
 
 class ConvLayer(nn.Sequential):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        downsample=False,
-        blur_kernel=[1, 3, 3, 1],
-        bias=True,
-        activate=True,
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            downsample=False,
+            blur_kernel=[1, 3, 3, 1],
+            bias=True,
+            activate=True,
     ):
         layers = []
 
@@ -667,22 +665,26 @@ class Discriminator(nn.Module):
             EqualLinear(channels[4] * 4 * 4, channels[4], activation='fused_lrelu'),
             EqualLinear(channels[4], 1),
         )
+        self.mixing_linear = nn.Sequential(
+            EqualLinear(channels[4] * 4 * 4 * 8, channels[4], activation='fused_lrelu'), # Only applies to batch_size = 4 (fake, interp)
+            EqualLinear(channels[4], 4 * 4),
+        )
 
+    def forward(self, inp, flag=None, real=False):
 
+        # flag=0: regular training (adversarial)
+        # flag=1: mixing coefficient prediction
 
-
-    def forward(self, inp, ind = None, real = False):
-
-        feat = []
+        feat = None
         for i in range(len(self.convs)):
             if i == 0:
                 inp = self.convs[i](inp)
-                feat.append(inp)
+                # feat.append(inp)
             else:
                 temp1 = self.convs[i].conv1(inp)
-                feat.append(temp1)
+                # feat.append(temp1)
                 temp2 = self.convs[i].conv2(temp1)
-                feat.append(temp2)
+                # feat.append(temp2)
                 inp = self.convs[i](inp)
 
         out = inp
@@ -697,11 +699,17 @@ class Discriminator(nn.Module):
         stddev = stddev.repeat(group, 1, height, width)
         out = torch.cat([out, stddev], 1)
 
-
         out = self.final_conv(out)
-        feat.append(out)
+        # feat.append(out)
         out = out.view(batch, -1)
-        out = self.final_linear(out)
+
+        if flag > 0:
+            out = out.view(1, -1)
+            out = self.mixing_linear(out)
+            out = out.view(4, -1)
+            out = F.softmax(out, dim=1)
+        else:
+            out = self.final_linear(out)
 
         return out, feat
 
@@ -722,14 +730,15 @@ class Patch_Discriminator(nn.Module):
             1024: 16 * channel_multiplier,
         }
 
-        convs = [ConvLayer(3, channels[size], 1)] # 3 -> 128 (1x1 conv)
+        convs = [ConvLayer(3, channels[size], 1)]  # 3 -> 128 (1x1 conv)
 
-        log_size = int(math.log(size, 2)) # 8
+        log_size = int(math.log(size, 2))  # 8
 
-        in_channel = channels[size] # 128
+        in_channel = channels[size]  # 128
 
-        for i in range(log_size, 2, -1): # 8(256,128,128), 7(512,64,64), 6(512,32,32), 5(512,16,16), 4(612,8,8), 3(512,4,4)
-            out_channel = channels[2 ** (i - 1)] # Halving channel size
+        for i in range(log_size, 2,
+                       -1):  # 8(256,128,128), 7(512,64,64), 6(512,32,32), 5(512,16,16), 4(612,8,8), 3(512,4,4)
+            out_channel = channels[2 ** (i - 1)]  # Halving channel size
 
             convs.append(ResBlock(in_channel, out_channel, blur_kernel))
 
@@ -739,25 +748,21 @@ class Patch_Discriminator(nn.Module):
         self.stddev_group = 4
         self.stddev_feat = 1
 
-        self.final_conv = ConvLayer(in_channel + 1, channels[4], 3) # 129 -> 512
+        self.final_conv = ConvLayer(in_channel + 1, channels[4], 3)  # 129 -> 512
         self.final_linear = nn.Sequential(
-            EqualLinear(channels[4] * 4 * 4, channels[4], activation='fused_lrelu'), # 512*4*4 -> 512
-            EqualLinear(channels[4], 1), # 512 -> 1 (Real, Fake)
+            EqualLinear(channels[4] * 4 * 4, channels[4], activation='fused_lrelu'),  # 512*4*4 -> 512
+            EqualLinear(channels[4], 1),  # 512 -> 1 (Real, Fake)
         )
         self.sfm = nn.Softmax(dim=1)
         self.sim = nn.CosineSimilarity()
 
-        ## May have to be optional
-        self.sim_linear = EqualLinear(512, 512, activation=None)
-
-
-    def forward(self, inp, ind = None, extra = None, flag = None, p_ind = None, real=False, sim=False):
+    def forward(self, inp, ind=None, extra=None, flag=None, p_ind=None, real=False, sim=False):
         feat = []
-        for i in range(len(self.convs)): # len(self.convs) = 7
+        for i in range(len(self.convs)):  # len(self.convs) = 7
             if i == 0:
-                inp = self.convs[i](inp) # 1x1 conv -> (B, 128, 256, 256)
+                inp = self.convs[i](inp)  # 1x1 conv -> (B, 128, 256, 256)
             else:
-                temp1 = self.convs[i].conv1(inp) # (B, C, H, W)
+                temp1 = self.convs[i].conv1(inp)  # (B, C, H, W)
                 if (flag > 0) and (temp1.shape[1] == 512) and (temp1.shape[2] == 32 or temp1.shape[2] == 16):
                     feat.append(temp1)
                 temp2 = self.convs[i].conv2(temp1)
@@ -784,9 +789,6 @@ class Patch_Discriminator(nn.Module):
         out = out.view(batch, -1)
         if sim:
             pre_out = self.final_linear[0](out)
-            # May have to be optional
-            pre_out = self.sim_linear(pre_out)
-
             out = self.final_linear[1](pre_out)
 
             n_sample = batch // 2
@@ -794,14 +796,13 @@ class Patch_Discriminator(nn.Module):
             for idx1 in range(n_sample):
                 for idx2 in range(n_sample):
                     sims[idx1, idx2] = self.sim(
-                        torch.unsqueeze(pre_out[idx2], 0), torch.unsqueeze(pre_out[idx1+n_sample], 0)
+                        torch.unsqueeze(pre_out[idx2], 0), torch.unsqueeze(pre_out[idx1 + n_sample], 0)
                     )
             sims = self.sfm(sims)
         else:
             sims = None
             out = self.final_linear(out)
         return out, sims
-
 
 
 class Extra(nn.Module):
