@@ -758,13 +758,13 @@ class Patch_Discriminator(nn.Module):
                 inp = self.convs[i](inp) # 1x1 conv -> (B, 128, 256, 256)
             else:
                 temp1 = self.convs[i].conv1(inp) # (B, C, H, W)
-                if (flag > 0) and (temp1.shape[1] == 512) and (temp1.shape[2] == 32 or temp1.shape[2] == 16):
+                if (flag == 0) and (temp1.shape[1] == 512) and (temp1.shape[2] == 32 or temp1.shape[2] == 16):
                     feat.append(temp1)
                 temp2 = self.convs[i].conv2(temp1)
-                if (flag > 0) and (temp2.shape[1] == 512) and (temp2.shape[2] == 32 or temp2.shape[2] == 16):
+                if (flag == 0) and (temp2.shape[1] == 512) and (temp2.shape[2] == 32 or temp2.shape[2] == 16):
                     feat.append(temp2)
                 inp = self.convs[i](inp)
-                if (flag > 0) and len(feat) == 4:
+                if (flag == 0) and len(feat) == 4:
                     # We use 4 possible intermediate feature maps to be used for patch-based adversarial loss. Any one of them is selected randomly during training.
                     inp = extra(feat[p_ind], p_ind)
                     return inp, None
